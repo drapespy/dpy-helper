@@ -10,6 +10,11 @@ discord = "^1.0.1"
 paginator = "^0.5.1"
 flask = "^1.1.2"
 doc-search = "^1.0.7"
+bs4 = "^0.0.1"
+utils = "^1.0.1"
+fuzzy-match = "^0.0.1"
+jishaku = "^2.0.0"
+"discord.py" = "^1.7.3"
 
 [tool.poetry.dev-dependencies]
 

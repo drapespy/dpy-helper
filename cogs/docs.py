@@ -1,163 +1,71 @@
 import discord
 from discord.ext import commands
-import re
-import io
-import zlib
-import os
-import aiohttp
+from doc_search import AsyncScraper
 
-class SphinxObjectFileReader:
-    BUFSIZE = 16 * 1024
-
-    def __init__(self, buffer):
-        self.stream = io.BytesIO(buffer)
-
-    def readline(self):
-        return self.stream.readline().decode("utf-8")
-
-    def skipline(self):
-        self.stream.readline()
-
-    def read_compressed_chunks(self):
-        decompressor = zlib.decompressobj()
-        while True:
-            chunk = self.stream.read(self.BUFSIZE)
-            if len(chunk) == 0:
-                break
-            yield decompressor.decompress(chunk)
-        yield decompressor.flush()
-
-    def read_compressed_lines(self):
-        buf = b""
-        for chunk in self.read_compressed_chunks():
-            buf += chunk
-            pos = buf.find(b"\n")
-            while pos != -1:
-                yield buf[:pos].decode("utf-8")
-                buf = buf[pos + 1 :]
-                pos = buf.find(b"\n")
+scraper = AsyncScraper()
 
 class Docs(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        page_types = {
-            "latest": "https://discordpy.readthedocs.io/en/latest",
-            "python": "https://docs.python.org/3",
-            "asyncpg": "https://magicstack.github.io/asyncpg/current/",
-        }
-        bot.loop.create_task(
-            self.build_rtfm_lookup_table(page_types=page_types)
-        )
-        self.bot.session = aiohttp.ClientSession()
 
-    def parse_object_inv(self, stream, url):
-        # key: URL
-        # n.b.: key doesn't have `discord` or `discord.ext.commands` namespaces
-        result = {}
-        # first line is version info
-        inv_version = stream.readline().rstrip()
-        if inv_version != "# Sphinx inventory version 2":
-            raise RuntimeError("Invalid objects.inv file version.")
-        # next line is "# Project: <name>"
-        # then after that is "# Version: <version>"
-        projname = stream.readline().rstrip()[11:]
-        version = stream.readline().rstrip()[11:]
-        # next line says if it's a zlib header
-        line = stream.readline()
-        if "zlib" not in line:
-            raise RuntimeError(
-                "Invalid objects.inv file, not z-lib compatible."
-            )
-        # This code mostly comes from the Sphinx repository.
-        entry_regex = re.compile(
-            r"(?x)(.+?)\s+(\S*:\S*)\s+(-?\d+)\s+(\S+)\s+(.*)"
-        )
-        for line in stream.read_compressed_lines():
-            match = entry_regex.match(line.rstrip())
-            if not match:
-                continue
-            name, directive, prio, location, dispname = match.groups()
-            domain, _, subdirective = directive.partition(":")
-            if directive == "py:module" and name in result:
-                # From the Sphinx Repository:
-                # due to a bug in 1.1 and below,
-                # two inventory entries are created
-                # for Python modules, and the first
-                # one is correct
-                continue
-            # Most documentation pages have a label
-            if directive == "std:doc":
-                subdirective = "label"
-            if location.endswith("$"):
-                location = location[:-1] + name
-            key = name if dispname == "-" else dispname
-            prefix = f"{subdirective}:" if domain == "std" else ""
-            if projname == "discord.py":
-                key = key.replace("discord.ext.commands.", "").replace(
-                    "discord.", ""
-                )
-            result[f"{prefix}{key}"] = os.path.join(url, location)
-        return result
+    async def refer(self, ctx:commands.Context, **kwargs):
+        """
+        Replying to the message reference
+        """
+        if ctx.message.reference:
+            channel = self.bot.get_channel(ctx.message.reference.channel_id)
+            msg = await channel.fetch_message(ctx.message.reference.message_id)
+            return await msg.reply(mention_author=False, **kwargs)
 
-    async def build_rtfm_lookup_table(self, page_types):
-        cache = {}
-        for key, page in page_types.items():
-            sub = cache[key] = {}
-            async with self.bot.session.get(page + "/objects.inv") as resp:
-                if resp.status != 200:
-                    raise RuntimeError(
-                        "Cannot build rtfm lookup table, try again later."
-                    )
-                stream = SphinxObjectFileReader(await resp.read())
-                cache[key] = self.parse_object_inv(stream, page)
-        self.bot._rtfm_cache = cache
+        else:
+            return await ctx.message.reply(mention_author=False, **kwargs)
 
-    async def uhh_rtfm_pls(self, ctx, key, obj):
-        page_types = {
-            "latest": "https://discordpy.readthedocs.io/en/latest",
-            "python": "https://docs.python.org/3",
-            "asyncpg": "https://magicstack.github.io/asyncpg/current/",
-        }
-        if obj is None:
-            await ctx.send(page_types[key])
-            return
-        if not hasattr(self.bot, "_rtfm_cache"):
-            await ctx.trigger_typing()
-            await self.build_rtfm_lookup_table(page_types)
-        obj = re.sub(
-            r"^(?:discord\.(?:ext\.)?)?(?:commands\.)?(.+)", r"\1", obj
-        )
-        if key.startswith("latest"):
-            # point the abc.Messageable types properly:
-            q = obj.lower()
-            for name in dir(discord.abc.Messageable):
-                if name[0] == "_":
-                    continue
-                if q == name:
-                    obj = f"abc.Messageable.{name}"
-                    break
-        cache = list(self.bot._rtfm_cache[key].items())
+    @commands.group(name='rtfm',aliases=['rtfd'], invoke_without_command=True)
+    async def rtfm(self, ctx, *, query=None):
+        """
+        Documentation search command.
+        The default is the discord.py documentation at https://discordpy.readthedocs.io/en/latest
+        All other functionality is within its subcommands.
+        """
+        if not query:
+            await self.refer(ctx, content='https://discordpy.readthedocs.io/en/latest')
+        else:
+            results = await scraper.search(query, page="https://discordpy.readthedocs.io/en/latest")
+            if not results:
+                await ctx.send("Could not find anything. Sorry.")
+            else: 
+                x = '\n'.join(['[`{}`]({})'.format(item.replace('discord.ext.commands.', '').replace('discord.', ''), url) for item, url in results[:8]])
+                await self.refer(ctx, embed=discord.Embed(description=x, color=discord.Color.blurple()))
 
-    @commands.group(
-        invoke_without_command=True,
-        aliases=[
-            "read_the_fucking_manual",
-            "rtfd",
-            "read_the_fucking_doc",
-            "read_tfm",
-            "read_tfd",
-        ],
-    )
-    async def rtfm(self, ctx, *, thing: str = None):
-        await self.uhh_rtfm_pls(ctx, "latest", thing)
+    @rtfm.command(name='python',aliases=['py'])
+    async def rtfm_python(self, ctx, *, query=None):
+        """
+        Searches the official Python documentation at https://docs.python.org/3/
+        """
+        if not query:
+            await self.refer(ctx, content='https://docs.python.org/3/')
+        else:
+            results = await scraper.search(query, page="https://docs.python.org/3/")
+            if not results:
+                await ctx.send("Could not find anything. Sorry.")
+            else: 
+                x = '\n'.join(['[`{}`]({})'.format(item, url) for item, url in results[:8]])
+                await self.refer(ctx, embed=discord.Embed(description=x, color=discord.Color.blurple()))
 
-    @rtfm.command(name="py", aliases=["python"])
-    async def rtfm_py(self, ctx, *, thing: str = None):
-        await self.uhh_rtfm_pls(ctx, "python", thing)
-
-    @rtfm.command(name="asyncpg", aliases=["apg"])
-    async def rtfm_asyncpg(self, ctx, *, thing: str = None):
-        await self.uhh_rtfm_pls(ctx, "asyncpg", thing)
+    @rtfm.command(name='jishaku',aliases=['jsk'])
+    async def rtfm_jishaku(self, ctx, *, query=None):
+        """
+        Searches the jishaku documentation at https://jishaku.readthedocs.io/en/latest/
+        """
+        if not query:
+            await self.refer(ctx, content='https://jishaku.readthedocs.io/en/latest/')
+        else:
+            results = await scraper.search(query, page="https://jishaku.readthedocs.io/en/latest/")
+            if not results:
+                await ctx.send("Could not find anything. Sorry.")
+            else: 
+                x = '\n'.join(['[`{}`]({})'.format(item, url) for item, url in results[:8]])
+                await self.refer(ctx, embed=discord.Embed(description=x, color=discord.Color.blurple()))
 
 def setup(bot):
     bot.add_cog(Docs(bot))
