@@ -64,7 +64,22 @@ class Docs(commands.Cog):
             if not results:
                 await ctx.send("Could not find anything. Sorry.")
             else: 
-                x = '\n'.join(['[`{}`]({})'.format(item, url) for item, url in results[:8]])
+                x = '\n'.join(['[`{}`]({})'.format(item.replace('jishaku.', ''), url) for item, url in results[:8]])
+                await self.refer(ctx, embed=discord.Embed(description=x, color=discord.Color.blurple()))
+
+    @rtfm.command(name='asyncpg',aliases=['postgresql', 'apg','pg'])
+    async def rtfm_asyncpg(self, ctx, *, query=None):
+        """
+        Searches the asyncpg documentation at https://magicstack.github.io/asyncpg/current/
+        """
+        if not query:
+            await self.refer(ctx, content='https://magicstack.github.io/asyncpg/current/')
+        else:
+            results = await scraper.search(query, page="https://magicstack.github.io/asyncpg/current/")
+            if not results:
+                await ctx.send("Could not find anything. Sorry.")
+            else: 
+                x = '\n'.join(['[`{}`]({})'.format(item.replace('asyncpg.',''), url) for item, url in results[:8]])
                 await self.refer(ctx, embed=discord.Embed(description=x, color=discord.Color.blurple()))
 
 def setup(bot):
